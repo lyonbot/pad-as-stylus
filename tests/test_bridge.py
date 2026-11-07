@@ -57,4 +57,18 @@ class BridgeTests(unittest.TestCase):
             self.send([dict(type='touch_move', x=0, y=0, buttons=10)])
 
 
+    def test_gesture_settings_merge_and_validate(self):
+        updated = self.bridge.set_gestures(dict(zoomEnabled=False, panSpeed=2))
+        self.assertFalse(updated['zoomEnabled'])
+        self.assertTrue(updated['panEnabled'])
+        self.assertEqual(updated['panSpeed'], 2)
+        self.assertEqual(updated['pinchSlop'], 24)
+
+    def test_gesture_settings_reject_bad_values_atomically(self):
+        for bad in (dict(panEnabled='yes'), dict(panSpeed=99), dict(pinchSlop=float('nan'))):
+            with self.assertRaises(ValueError):
+                self.bridge.set_gestures(dict(bad, zoomSpeed=2))
+        self.assertEqual(self.bridge.gestures['zoomSpeed'], 1)
+
+
 if __name__ == '__main__': unittest.main()

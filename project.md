@@ -13,18 +13,21 @@
 
 | 文件 | 职责 |
 | --- | --- |
-| `web/index.html` | 全屏笔输入区，忽略手指；采集归一化坐标、压力、倾斜，按顺序小批量发送 |
+| `web/index.html` | 全屏输入区；采集笔的归一化坐标、压力、倾斜，手指交给 touch-input.js，按顺序小批量发送 |
 | `web/pen-input.js` | 直接在全屏输入元素 `#pad` 上处理 over/enter/move/out/leave，独立管理悬停与笔尖按压状态 |
+| `web/touch-input.js` | 手指触点采集（slot 0-9），可选的“笔在附近时忽略手指”（`penRejection`，默认关，由平板系统自行屏蔽触摸时无需开启）；只上报原始触点，不识别手势 |
+| `web/gesture-settings.js` | 平板页面右上角的「平移」「缩放」开关与 ⚙ 设置面板（速度、触发阈值），经 `/api/gestures` 读写 |
 | `web/trail.js` | Canvas 轨迹预览，落笔绿色实线、悬停蓝色虚线，约 1.5 秒自动淡出，支持清除 |
 | `web/settings.html` | Mac 设置页：映射预览、拖动和等比缩放、事件状态、笔模式开关 |
-| `server.py` | aiohttp HTTP/WebSocket 同端口服务、输入校验、会话隔离、坐标转换、断连自动抬笔 |
-| `protocol.py` | 二进制数据包校验与解码，生成 ACK |
+| `server.py` | aiohttp HTTP/WebSocket 同端口服务、`/api/gestures` 手势设置（校验、持久化、转发给 Swift）、输入校验、会话隔离、坐标转换、断连自动抬笔 |
+| `protocol.py` | 二进制数据包校验与解码，生成 ACK；`touch_*` 记录用 buttons 字节携带触点 slot |
 | `web/transport.js` | 持久 WebSocket、二进制编码、心跳、ACK 检测、退避重连与丢弃旧输入队列 |
 | `requirements.txt` | 固定 aiohttp 版本，启动时自动安装到项目 `.venv` |
-| `native/PenBridge.swift` | 原生菜单栏、置顶映射框、双向 JSON 通信及 mouse/drag/up 注入，附加压感和倾斜字段 |
+| `native/PenBridge.swift` | 原生菜单栏、置顶映射框、双向 JSON 通信及 mouse/drag/up 注入，附加压感和倾斜字段；`TouchGestures` 将双指平移识别为带 phase 的触控板式滚动、双指捏合识别为 magnify 手势事件（私有 CGEvent 字段，暂无惯性） |
 | `usb.py` | 自动检测 ADB 设备、配置 reverse、打开网页，拔插后重连 |
 | `Start.command` | Finder 双击启动入口 |
 | `run.sh` | 编译 Swift（源码未变化则复用），启动服务 |
+| `tests/test_touch_input.cjs` | 触点 slot 分配、笔优先、忽略工具按钮 |
 | `tests/test_bridge.py` | 验证坐标与压力映射、抬笔、去重、非法数据和会话更换 |
 
 输入使用持久 WebSocket，HTTP 页面、设置 API 和 WebSocket 共用同一端口。握手使用一条 JSON，后续事件和心跳均为二进制。按顺序小批量发送，边界事件及时发送；空闲每 400ms 心跳保活。依赖仅 aiohttp，首次运行自动创建 `.venv` 并安装固定版本，无需手工 pip/npm 操作。
@@ -63,7 +66,7 @@ bash run.sh
 5. 菜单栏笔尖图标提供显示/隐藏映射框、暂停/恢复、连接状态、查看高级设置、退出。
 6. 拔插 USB 后自动恢复端口转发，保留原来的 Chrome 页面；页面保持全屏时自动重连，不另开标签页、不需要再次点“开始书写”。退出全屏、切后台或页面被系统销毁后，重新点开始。
 
-映射位置、宽度和笔模式保存在 `.local/mapping.json`，重启保留。浏览器入口无法越过锁屏，也无法自动点击网页全屏按钮，仍需用户解锁并点一次。
+映射位置、宽度、笔模式和手势设置保存在 `.local/mapping.json`，重启保留。浏览器入口无法越过锁屏，也无法自动点击网页全屏按钮，仍需用户解锁并点一次。
 
 常用参数：
 
@@ -100,7 +103,8 @@ node --test tests/test_pen_input.cjs tests/test_transport.cjs
 人工验收：
 
 - 在平板四角落笔，Mac 光标落到映射矩形对应四角；圆形运动不被横向/纵向拉伸。
-- 连续点击、写字、拖动窗口，抬笔后不再拖动；手指触摸不控制鼠标。
+- 连续点击、写字、拖动窗口，抬笔后不再拖动；手指只用于双指滚动和捏合缩放，不移动光标或点击。
+- 双指在网页或文档上拖动：内容跟手滚动（方向如与预期相反，见 `native/PenBridge.swift` 的 `TouchGestures.post`）；在 Safari/预览等应用中双指捏合缩放（以光标为中心，一次手势内平移与缩放二选一）；三指以上无动作。
 - 设置页拖动位置、拉角缩放后保存，比例保持为平板输入区比例。
 - 按住笔时拔线，最迟约 1.5 秒内释放左键；重新插回后原全屏页面自动建立新会话。断线期间的数据不重放，旧连接不能释放新会话的笔。
 - 退出全屏、切后台、旋转平板后输入暂停，重新开始会同步尺寸。

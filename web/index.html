@@ -3,19 +3,30 @@
 <meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no">
 <title>Pad as Stylus</title>
 <style>
-*{box-sizing:border-box}html,body{margin:0;width:100%;height:100%;overflow:hidden;background:#101923;color:#dae7f0;font:16px system-ui}#pad{position:fixed;inset:0;touch-action:none;user-select:none;background:radial-gradient(#304254 1px,transparent 1px);background-size:28px 28px}#trail{position:absolute;inset:0;width:100%;height:100%;pointer-events:none}#hud{position:absolute;top:16px;left:20px;pointer-events:none;font:14px ui-monospace,monospace;color:#95b0c7}#legend{position:absolute;bottom:16px;left:20px;color:#95b0c7;font-size:13px;pointer-events:none}#clear{position:absolute;right:16px;top:12px;font-size:14px;padding:10px 16px;background:#283d4c;color:#dae7f0}#gate{position:fixed;inset:0;display:grid;place-content:center;text-align:center;background:#101923ee;padding:30px}button{background:#91edce;color:#10261f;border:0;border-radius:12px;padding:16px 30px;font:600 19px system-ui}p{color:#9eb4c7;max-width:500px;line-height:1.7}#dot{position:absolute;width:14px;height:14px;border:2px solid #91edce;border-radius:50%;pointer-events:none;display:none;transform:translate(-50%,-50%)}
+*{box-sizing:border-box}html,body{margin:0;width:100%;height:100%;overflow:hidden;background:#101923;color:#dae7f0;font:16px system-ui}#pad{position:fixed;inset:0;touch-action:none;user-select:none;background:radial-gradient(#304254 1px,transparent 1px);background-size:28px 28px}#trail{position:absolute;inset:0;width:100%;height:100%;pointer-events:none}#hud{position:absolute;top:16px;left:20px;pointer-events:none;font:14px ui-monospace,monospace;color:#95b0c7}#legend{position:absolute;bottom:16px;left:20px;color:#95b0c7;font-size:13px;pointer-events:none}#tools{position:absolute;right:16px;top:12px;display:flex;gap:8px}#tools button{font-size:14px;padding:10px 16px;background:#283d4c;color:#dae7f0;border-radius:12px}#tools button.off{background:#3a2a2a;color:#a98;text-decoration:line-through}#settings-panel{position:absolute;right:16px;top:68px;width:300px;padding:16px 18px;background:#182736f2;border:1px solid #547086;border-radius:14px;font-size:14px}#settings-panel[hidden]{display:none}#settings-panel label{display:block;margin:12px 0 2px}#settings-panel input[type=range]{width:100%}#settings-panel input[type=checkbox]{width:auto;margin-right:8px}#settings-panel output{float:right;color:#91edce}#settings-panel .row{display:flex;gap:8px;margin-top:14px}#settings-panel button{font-size:14px;padding:9px 14px;border-radius:10px}
+#gate{position:fixed;inset:0;display:grid;place-content:center;text-align:center;background:#101923ee;padding:30px}button{background:#91edce;color:#10261f;border:0;border-radius:12px;padding:16px 30px;font:600 19px system-ui}p{color:#9eb4c7;max-width:500px;line-height:1.7}#dot{position:absolute;width:14px;height:14px;border:2px solid #91edce;border-radius:50%;pointer-events:none;display:none;transform:translate(-50%,-50%)}
 </style>
-<div id="pad"><canvas id="trail"></canvas><div id="hud">等待连接</div><div id="dot"></div><div id="legend">绿色实线：落笔 · 蓝色虚线：悬停</div><button id="clear" data-no-pen-input>清除轨迹</button>
+<div id="pad"><canvas id="trail"></canvas><div id="hud">等待连接</div><div id="dot"></div><div id="legend">绿色实线：落笔 · 蓝色虚线：悬停</div><div id="tools" data-no-pen-input><button id="toggle-pan" aria-pressed="true">平移</button><button id="toggle-zoom" aria-pressed="true">缩放</button><button id="clear">清除轨迹</button><button id="settings-open" aria-label="手势设置">⚙</button></div>
+<div id="settings-panel" data-no-pen-input hidden data-defaults='{"panEnabled":true,"zoomEnabled":true,"penRejection":false,"panSpeed":1,"zoomSpeed":1,"panSlop":8,"pinchSlop":24}'>
+<strong>双指手势设置</strong>
+<label>平移速度<output id="value-panSpeed"></output><input type="range" name="panSpeed" min="0.2" max="3" step="0.1"></label>
+<label>缩放速度<output id="value-zoomSpeed"></output><input type="range" name="zoomSpeed" min="0.2" max="3" step="0.1"></label>
+<label>平移触发阈值（Mac 点）<output id="value-panSlop"></output><input type="range" name="panSlop" min="2" max="40" step="1"></label>
+<label>缩放触发阈值（Mac 点）<output id="value-pinchSlop"></output><input type="range" name="pinchSlop" min="8" max="80" step="1"></label>
+<label><input type="checkbox" name="penRejection"> 笔在附近时忽略手指（平板已自动屏蔽时无需开启）</label>
+<div class="row"><button id="settings-reset">恢复默认</button><button id="settings-close">关闭</button></div></div>
 <div id="gate"><h1>Pad as Stylus</h1><p>USB 连接 Mac 后，点一下进入全屏。使用手写笔控制 Mac；双指拖动滚动页面（手写笔在感应范围内时忽略手指）。</p><button id="start">开始书写</button><p id="message">退出全屏或切换页面会停止输入。</p></div>
 </div>
 <script src="/pen-input.js"></script>
 <script src="/touch-input.js"></script>
+<script src="/gesture-settings.js"></script>
 <script src="/trail.js"></script>
 <script src="/transport.js"></script>
 <script>
 const pad=document.querySelector('#pad'),hud=document.querySelector('#hud'),gate=document.querySelector('#gate'),dot=document.querySelector('#dot'),message=document.querySelector('#message');
 const trail=createPenTrail(document.querySelector('#trail'));
 document.querySelector('#clear').onclick=()=>trail.clear();
+const gestureSettings=createGestureSettings({root:pad});
 let stopped=true,geometry='',lastSample=null;
 function dims(){return `${pad.clientWidth}/${pad.clientHeight}`}
 function resetInput(){penInput.reset();touchInput.reset();lastSample=null;dot.style.display='none';trail.break();}
@@ -34,8 +45,13 @@ function recordTouch(e,type){
  const rect=pad.getBoundingClientRect();
  transport.send({type:'touch_'+type,buttons:e.slot,x:Math.max(0,Math.min(1,(e.clientX-rect.left)/rect.width)),y:Math.max(0,Math.min(1,(e.clientY-rect.top)/rect.height))});
 }
-const touchInput=createTouchInput({surface:pad,emit:recordTouch,isRunning:()=>!stopped,penActive:()=>penInput.state.inRange||penInput.state.contact!==null});
-const penInput=createPenInput({surface:pad,emit:(e,type)=>{if(type==='enter'||type==='down')touchInput.cancelAll();record(e,type);if(type==='leave'||type==='cancel')dot.style.display='none'},isRunning:()=>!stopped,onBoundary:flush});
+// Optional palm guard (off by default; most tablets already block touch while the pen is near).
+// Android may not deliver pointerleave when the pen leaves hover range, so pen presence is judged by
+// recent pen activity rather than by the in-range flag, which can stay stuck and block fingers.
+const PEN_HOLD_MS=500;let lastPenAt=-Infinity;
+const penBusy=()=>!!gestureSettings.state.penRejection&&(penInput.state.contact!==null||performance.now()-lastPenAt<PEN_HOLD_MS);
+const touchInput=createTouchInput({surface:pad,emit:recordTouch,isRunning:()=>!stopped,penActive:penBusy});
+const penInput=createPenInput({surface:pad,emit:(e,type)=>{lastPenAt=performance.now();if(gestureSettings.state.penRejection&&(type==='enter'||type==='down'))touchInput.cancelAll();record(e,type);if(type==='leave'||type==='cancel')dot.style.display='none'},isRunning:()=>!stopped,onBoundary:flush});
 const transport=new PenTransport({url:()=>`${location.protocol==='https:'?'wss':'ws'}://${location.host}/ws`,ratio:()=>pad.clientWidth/pad.clientHeight,
  onReset:resetInput,onState:(state,text)=>{
   stopped=state!=='connected';hud.textContent=text;

@@ -17,6 +17,8 @@ from protocol import decode_packet, acknowledgement
 from usb import USBConnection
 
 ROOT = Path(__file__).resolve().parent
+GESTURE_DEFAULTS = dict(panEnabled=True, zoomEnabled=True, penRejection=False, panSpeed=1.0, zoomSpeed=1.0, panSlop=8.0, pinchSlop=24.0)
+GESTURE_LIMITS = dict(panSpeed=(.1, 5), zoomSpeed=(.1, 5), panSlop=(1, 100), pinchSlop=(2, 200))
 TOUCH_TYPES = ('touch_down', 'touch_move', 'touch_up', 'touch_cancel')
 
 
@@ -42,6 +44,7 @@ class Bridge:
             print('提示：当前无法读取显示器，dry-run 使用 1920×1080 预览。', flush=True)
         self.config = dict(x=self.screen['x'], y=self.screen['y'], width=self.screen['width'] * .75,
                            ratio=4 / 3, pen=True)
+        self.gestures = dict(GESTURE_DEFAULTS)
         self.persist = persist
         self.config_path = ROOT / '.local/mapping.json'
         if persist and self.config_path.exists():
@@ -50,6 +53,7 @@ class Bridge:
                 for key in ('x', 'y', 'width', 'ratio'):
                     self.config[key] = number(saved[key], .1 if key in ('width', 'ratio') else -50000, 50000)
                 self.config['pen'] = bool(saved['pen'])
+                self.gestures = self.validated_gestures(saved.get('gestures', {}))
             except (ValueError, KeyError, TypeError):
                 print('映射配置无效，使用默认值。', flush=True)
         self.session = None
@@ -71,17 +75,38 @@ class Bridge:
                                           stdout=subprocess.PIPE, text=True, bufsize=1)
             threading.Thread(target=self.native_messages, daemon=True).start()
 
+    def validated_gestures(self, data):
+        """Merge a partial update into the current gesture settings, rejecting bad values."""
+        result = dict(self.gestures)
+        for key in ('panEnabled', 'zoomEnabled', 'penRejection'):
+            if key in data:
+                if not isinstance(data[key], bool):
+                    raise ValueError(key + ' 需要布尔值')
+                result[key] = data[key]
+        for key, (low, high) in GESTURE_LIMITS.items():
+            if key in data:
+                result[key] = number(data[key], low, high)
+        return result
+
+    def set_gestures(self, data):
+        with self.lock:
+            self.gestures = self.validated_gestures(data)
+            self.send_config()
+            self.save_config()
+            return dict(self.gestures)
+
     def send_config(self):
         if self.child:
             self.child.stdin.write(json.dumps(dict(self.config, type='config', port=self.port,
                                                   connected=bool(self.session))) + '\n')
+            self.child.stdin.write(json.dumps(dict(self.gestures, type='gestures')) + '\n')
             self.child.stdin.flush()
 
     def save_config(self):
         if self.persist:
             self.config_path.parent.mkdir(exist_ok=True)
             temporary = self.config_path.with_suffix('.tmp')
-            temporary.write_text(json.dumps(self.config))
+            temporary.write_text(json.dumps(dict(self.config, gestures=self.gestures)))
             temporary.replace(self.config_path)
 
     def native_messages(self):
@@ -237,9 +262,20 @@ def make_app(bridge):
             bridge.save_config()
         return web.json_response({'ok': True})
 
+    async def gestures(request):
+        if request.method == 'POST':
+            if request.content_type != 'application/json':
+                raise ValueError('需要 application/json')
+            data = await request.json()
+            if not isinstance(data, dict):
+                raise ValueError('需要 JSON 对象')
+            return web.json_response(bridge.set_gestures(data))
+        with bridge.lock:
+            return web.json_response(dict(bridge.gestures))
+
     async def asset(request):
         files = {'/': 'index.html', '/settings': 'settings.html',
-                 '/pen-input.js': 'pen-input.js', '/touch-input.js': 'touch-input.js', '/trail.js': 'trail.js',
+                 '/pen-input.js': 'pen-input.js', '/touch-input.js': 'touch-input.js', '/gesture-settings.js': 'gesture-settings.js', '/trail.js': 'trail.js',
                  '/transport.js': 'transport.js'}
         name = files.get(request.path)
         if not name: raise web.HTTPNotFound()
@@ -298,6 +334,8 @@ def make_app(bridge):
     app.router.add_get('/ws', websocket)
     app.router.add_get('/api/status', status)
     app.router.add_post('/api/config', config)
+    app.router.add_get('/api/gestures', gestures)
+    app.router.add_post('/api/gestures', gestures)
     app.router.add_get('/{path:.*}', asset)
     return app
 

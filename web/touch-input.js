@@ -1,5 +1,5 @@
 // Finger input: reports raw contacts only. Gesture recognition lives in the Mac bridge.
-// Fingers are ignored while the pen is in range so a resting palm cannot scroll.
+// `penActive` lets the page optionally ignore fingers near the pen (palm guard).
 window.createTouchInput = ({surface, emit, isRunning, penActive}) => {
  const slots=new Map(), last=new Map(), handlers=[];
  const MAX_SLOTS=10;

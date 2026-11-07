@@ -136,21 +136,34 @@ class MouseInput {
     }
 }
 
-/// Two-finger pan posted as trackpad-style scroll events (phased, continuous pixel deltas).
-/// Content follows the fingers. Three or more fingers cancel the pan until all lift.
-class TouchScroll {
+/// Two-finger gestures posted as trackpad events: pan as phased pixel scroll (content follows the
+/// fingers), pinch as magnify. The first clear motion picks one for the rest of the gesture.
+/// Three or more fingers cancel it until all lift. Both act at the cursor, like a trackpad.
+class TouchGestures {
+    enum Mode { case idle, undecided, pan, zoom, ignored }
     let source = tracing ? nil : CGEventSource(stateID: .hidSystemState)
-    let slop: CGFloat = 8
+    // Tunable from the tablet page; defaults mirror GESTURE_DEFAULTS in server.py.
+    var panEnabled = true, zoomEnabled = true
+    var panSlop: CGFloat = 8, pinchSlop: CGFloat = 24
+    var panGain: CGFloat = 1
+    /// Magnification per unit of relative finger-distance change.
+    var zoomGain = 1.0
     var touches: [Int: CGPoint] = [:]
+    var mode = Mode.idle
     var origin = CGPoint.zero
     var previous = CGPoint.zero
-    var active = false
+    var startDistance: CGFloat = 0
+    var lastDistance: CGFloat = 0
     var dead = false
     var remainder = CGPoint.zero
 
     var centroid: CGPoint {
         let sum = touches.values.reduce(CGPoint.zero) { CGPoint(x: $0.x + $1.x, y: $0.y + $1.y) }
         return CGPoint(x: sum.x / CGFloat(touches.count), y: sum.y / CGFloat(touches.count))
+    }
+    var distance: CGFloat {
+        let p = Array(touches.values)
+        return p.count == 2 ? hypot(p[0].x - p[1].x, p[0].y - p[1].y) : 0
     }
     func post(_ phase: Int64, dx: CGFloat, dy: CGFloat) {
         remainder.x += dx; remainder.y += dy
@@ -170,41 +183,82 @@ class TouchScroll {
         if let here = CGEvent(source: nil)?.location { event.location = here }
         event.post(tap: .cghidEventTap)
     }
-    func endPan() {
-        if active { post(4, dx: 0, dy: 0) }
-        active = false
+    /// NSEventTypeGesture (29) carrying kIOHIDEventTypeZoom (8). Fields 110 (HID event type),
+    /// 113 (magnification delta) and 132 (phase: 1 began, 2 changed, 4 ended) are private CGEvent
+    /// fields with no public API; the same technique is used by Mac Mouse Fix and MacTouch.
+    func magnify(_ amount: Double, phase: Int64) {
+        if tracing {
+            output(["event": "magnify", "phase": phase, "magnification": amount]); return
+        }
+        func field(_ n: UInt32) -> CGEventField { unsafeBitCast(n, to: CGEventField.self) }
+        guard let event = CGEvent(source: nil) else { return }
+        event.type = unsafeBitCast(UInt32(29), to: CGEventType.self)
+        event.setIntegerValueField(field(110), value: 8)
+        event.setIntegerValueField(field(132), value: phase)
+        event.setDoubleValueField(field(113), value: amount)
+        event.post(tap: .cghidEventTap)
     }
-    func rebase() { origin = centroid; previous = origin; active = false; remainder = .zero }
+    func endGesture() {
+        if mode == .pan { post(4, dx: 0, dy: 0) }
+        if mode == .zoom { magnify(0, phase: 4) }
+        mode = .idle
+    }
+    func rebase() {
+        origin = centroid; previous = origin; startDistance = distance; lastDistance = startDistance
+        mode = .undecided; remainder = .zero
+    }
+    func decide() {
+        let c = centroid
+        let moved = hypot(c.x - origin.x, c.y - origin.y), spread = abs(distance - startDistance)
+        // Panning needs the finger spacing to stay nearly constant; in-between spacing keeps waiting.
+        // A gesture whose kind is switched off is swallowed, not reinterpreted as the other kind.
+        if spread > pinchSlop && spread > moved {
+            if zoomEnabled { mode = .zoom; magnify(0, phase: 1) } else { mode = .ignored }
+        } else if moved > panSlop && spread <= pinchSlop / 2 {
+            if panEnabled {
+                mode = .pan; post(1, dx: (c.x - origin.x) * panGain, dy: (c.y - origin.y) * panGain); previous = c
+            } else { mode = .ignored }
+        }
+    }
     func handle(_ data: [String: Any]) {
         guard let kind = data["type"] as? String, let slot = data["slot"] as? Int else { return }
         let point = CGPoint(x: data["x"] as? Double ?? 0, y: data["y"] as? Double ?? 0)
         switch kind {
         case "touch_down":
             touches[slot] = point
-            if touches.count > 2 { endPan(); dead = true }
+            if touches.count > 2 { endGesture(); dead = true }
             else if touches.count == 2 && !dead { rebase() }
         case "touch_move":
             guard touches[slot] != nil else { return }
             touches[slot] = point
             guard touches.count == 2 && !dead else { return }
-            let c = centroid
-            if !active {
-                guard hypot(c.x - origin.x, c.y - origin.y) > slop else { return }
-                active = true
-                post(1, dx: c.x - origin.x, dy: c.y - origin.y)
-            } else {
-                post(2, dx: c.x - previous.x, dy: c.y - previous.y)
+            if mode == .undecided { decide() }
+            switch mode {
+            case .pan:
+                // The deciding move already posted the "began" phase.
+                let c = centroid
+                if c != previous { post(2, dx: (c.x - previous.x) * panGain, dy: (c.y - previous.y) * panGain); previous = c }
+            case .zoom:
+                let d = distance
+                if lastDistance > 0 && d > 0 { magnify((d / lastDistance - 1) * zoomGain, phase: 2) }
+                lastDistance = d
+            default: break
             }
-            previous = c
         case "touch_up", "touch_cancel":
-            if touches[slot] != nil {
-                endPan(); touches[slot] = nil
-            }
+            if touches[slot] != nil { endGesture(); touches[slot] = nil }
             if touches.isEmpty { dead = false }
         default: break
         }
     }
-    func reset() { endPan(); touches.removeAll(); dead = false }
+    func reset() { endGesture(); touches.removeAll(); dead = false }
+    func configure(_ data: [String: Any]) {
+        panEnabled = data["panEnabled"] as? Bool ?? panEnabled
+        zoomEnabled = data["zoomEnabled"] as? Bool ?? zoomEnabled
+        if let v = data["panSpeed"] as? Double { panGain = CGFloat(v) }
+        if let v = data["zoomSpeed"] as? Double { zoomGain = v }
+        if let v = data["panSlop"] as? Double { panSlop = CGFloat(v) }
+        if let v = data["pinchSlop"] as? Double { pinchSlop = CGFloat(v) }
+    }
 }
 
 class PenInput {
@@ -328,7 +382,7 @@ class PenInput {
     }
 }
 let input = PenInput()
-let touchScroll = TouchScroll()
+let touchGestures = TouchGestures()
 
 class MappingView: NSView {
     weak var owner: DesktopController?
@@ -448,7 +502,7 @@ class DesktopController: NSObject {
     }
     @objc func openSettings() { NSWorkspace.shared.open(URL(string: "http://localhost:\(port)/settings")!) }
     @objc func quitApp() {
-        input.reset(); touchScroll.reset()
+        input.reset(); touchGestures.reset()
         output(["type": "quit"]); NSApp.terminate(nil)
     }
 }
@@ -459,15 +513,16 @@ let desktop: DesktopController? = tracing ? nil : DesktopController()
 func handle(_ data: [String: Any]) {
     guard let kind = data["type"] as? String else { return }
     if kind == "config" { desktop?.apply(data); return }
-    if kind.hasPrefix("touch_") { touchScroll.handle(data); return }
-    if kind == "reset" { touchScroll.reset() }
+    if kind == "gestures" { touchGestures.configure(data); return }
+    if kind.hasPrefix("touch_") { touchGestures.handle(data); return }
+    if kind == "reset" { touchGestures.reset() }
     input.handle(data)
 }
 if tracing {
     while let line = readLine() {
         if let bytes = line.data(using: .utf8), let data = try? JSONSerialization.jsonObject(with: bytes) as? [String: Any] { handle(data) }
     }
-    input.reset(); touchScroll.reset(); exit(0)
+    input.reset(); touchGestures.reset(); exit(0)
 }
 DispatchQueue.global(qos: .userInteractive).async {
  while let line = readLine() {
@@ -477,7 +532,7 @@ DispatchQueue.global(qos: .userInteractive).async {
     DispatchQueue.main.async { handle(data) }
  }
  DispatchQueue.main.async {
-    input.reset(); touchScroll.reset()
+    input.reset(); touchGestures.reset()
     NSApp.terminate(nil)
  }
 }

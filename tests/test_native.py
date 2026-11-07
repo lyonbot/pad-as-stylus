@@ -152,7 +152,7 @@ class NativeLifecycleTests(unittest.TestCase):
         self.assertEqual(clicks, [3, 4, 3, 4])
 
 
-class TouchScrollTests(NativeLifecycleTests):
+class TouchGestureTests(NativeLifecycleTests):
     def touch(self, kind, slot, x, y):
         return dict(type='touch_' + kind, slot=slot, x=x, y=y)
 
@@ -168,6 +168,10 @@ class TouchScrollTests(NativeLifecycleTests):
                            self.touch('up', 1, 200, 130))
         self.assertEqual(out, [(1, 0, 10), (2, 0, 15), (4, 0, 0)])
 
+    def test_pan_waits_while_finger_spacing_is_changing(self):
+        # Centroid moved 30pt but spacing changed 16.6pt: neither a clean pan nor a pinch yet.
+        self.assertEqual(self.trace(*self.two_down(), self.touch('move', 0, 100, 160)), [])
+
     def test_single_finger_and_small_jitter_do_not_scroll(self):
         self.assertEqual(self.scrolls(self.touch('down', 0, 0, 0), self.touch('move', 0, 0, 90)), [])
         self.assertEqual(self.scrolls(*self.two_down(), self.touch('move', 0, 100, 103)), [])
@@ -177,6 +181,49 @@ class TouchScrollTests(NativeLifecycleTests):
                            self.touch('down', 2, 300, 100), self.touch('move', 0, 100, 200),
                            self.touch('up', 2, 300, 100), self.touch('move', 0, 100, 260))
         self.assertEqual([p for p, _, _ in out], [1, 4])
+
+    def test_small_finger_spread_change_does_not_zoom(self):
+        self.assertEqual(self.magnifies(*self.two_down(), self.touch('move', 1, 220, 100)), [])
+
+    def magnifies(self, *events):
+        return [(e['phase'], e['magnification']) for e in self.trace(*events) if e['event'] == 'magnify']
+
+    def test_pinch_out_magnifies_by_relative_distance_change(self):
+        out = self.magnifies(*self.two_down(), self.touch('move', 1, 230, 100),
+                             self.touch('move', 1, 250, 100), self.touch('up', 1, 250, 100))
+        self.assertEqual([p for p, _ in out], [1, 2, 2, 4])
+        self.assertAlmostEqual(out[1][1], .3)
+        self.assertAlmostEqual(out[2][1], 20 / 130)
+        self.assertEqual(out[3][1], 0)
+
+    def test_pinch_in_is_negative_and_never_scrolls(self):
+        events = self.trace(*self.two_down(), self.touch('move', 0, 130, 100), self.touch('move', 1, 170, 100))
+        self.assertEqual([e['event'] for e in events], ['magnify'] * 4)
+        self.assertTrue(all(e['magnification'] <= 0 for e in events))
+
+    def test_gesture_mode_stays_locked(self):
+        events = self.trace(*self.two_down(), self.touch('move', 1, 230, 100),
+                            self.touch('move', 0, 100, 300), self.touch('move', 1, 230, 300))
+        self.assertEqual({e['event'] for e in events}, {'magnify'})
+
+    def configure(self, **settings):
+        return dict(type='gestures', **settings)
+
+    def test_gestures_can_be_disabled_independently(self):
+        pinch = [*self.two_down(), self.touch('move', 1, 260, 100)]
+        pan = [*self.two_down(), self.touch('move', 0, 100, 140), self.touch('move', 1, 200, 140)]
+        self.assertEqual(self.trace(self.configure(zoomEnabled=False), *pinch), [])
+        self.assertEqual(self.trace(self.configure(panEnabled=False), *pan), [])
+        self.assertTrue(self.trace(self.configure(zoomEnabled=False), *pan))
+
+    def test_speed_and_thresholds_apply(self):
+        out = self.scrolls(self.configure(panSpeed=2, panSlop=2), *self.two_down(),
+                           self.touch('move', 0, 100, 104), self.touch('move', 1, 200, 104))
+        self.assertEqual(out[0], (1, 0, 8))
+        phase, amount = self.magnifies(self.configure(zoomSpeed=.5, pinchSlop=4), *self.two_down(),
+                                       self.touch('move', 1, 210, 100))[1]
+        self.assertEqual(phase, 2)
+        self.assertAlmostEqual(amount, .05)
 
     def test_reset_ends_active_pan(self):
         out = self.scrolls(*self.two_down(), self.touch('move', 0, 100, 120), dict(type='reset', x=0, y=0))

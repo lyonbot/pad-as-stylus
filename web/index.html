@@ -1,0 +1,58 @@
+<!doctype html>
+<html lang="zh-CN">
+<meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no">
+<title>Pad as Stylus</title>
+<style>
+*{box-sizing:border-box}html,body{margin:0;width:100%;height:100%;overflow:hidden;background:#101923;color:#dae7f0;font:16px system-ui}#pad{position:fixed;inset:0;touch-action:none;user-select:none;background:radial-gradient(#304254 1px,transparent 1px);background-size:28px 28px}#trail{position:absolute;inset:0;width:100%;height:100%;pointer-events:none}#hud{position:absolute;top:16px;left:20px;pointer-events:none;font:14px ui-monospace,monospace;color:#95b0c7}#legend{position:absolute;bottom:16px;left:20px;color:#95b0c7;font-size:13px;pointer-events:none}#clear{position:absolute;right:16px;top:12px;font-size:14px;padding:10px 16px;background:#283d4c;color:#dae7f0}#gate{position:fixed;inset:0;display:grid;place-content:center;text-align:center;background:#101923ee;padding:30px}button{background:#91edce;color:#10261f;border:0;border-radius:12px;padding:16px 30px;font:600 19px system-ui}p{color:#9eb4c7;max-width:500px;line-height:1.7}#dot{position:absolute;width:14px;height:14px;border:2px solid #91edce;border-radius:50%;pointer-events:none;display:none;transform:translate(-50%,-50%)}
+</style>
+<div id="pad"><canvas id="trail"></canvas><div id="hud">等待连接</div><div id="dot"></div><div id="legend">绿色实线：落笔 · 蓝色虚线：悬停</div><button id="clear" data-no-pen-input>清除轨迹</button>
+<div id="gate"><h1>Pad as Stylus</h1><p>USB 连接 Mac 后，点一下进入全屏。使用手写笔控制 Mac；双指拖动滚动页面（手写笔在感应范围内时忽略手指）。</p><button id="start">开始书写</button><p id="message">退出全屏或切换页面会停止输入。</p></div>
+</div>
+<script src="/pen-input.js"></script>
+<script src="/touch-input.js"></script>
+<script src="/trail.js"></script>
+<script src="/transport.js"></script>
+<script>
+const pad=document.querySelector('#pad'),hud=document.querySelector('#hud'),gate=document.querySelector('#gate'),dot=document.querySelector('#dot'),message=document.querySelector('#message');
+const trail=createPenTrail(document.querySelector('#trail'));
+document.querySelector('#clear').onclick=()=>trail.clear();
+let stopped=true,geometry='',lastSample=null;
+function dims(){return `${pad.clientWidth}/${pad.clientHeight}`}
+function resetInput(){penInput.reset();touchInput.reset();lastSample=null;dot.style.display='none';trail.break();}
+function stop(reason){transport.stop();stopped=true;gate.style.display='grid';message.textContent=reason;}
+function flush(){transport.flush();updateHUD();}
+function record(e,type){
+ if(stopped)return;
+ const rect=pad.getBoundingClientRect(),x=Math.max(0,Math.min(1,(e.clientX-rect.left)/rect.width)),y=Math.max(0,Math.min(1,(e.clientY-rect.top)/rect.height));
+ const event={type,x,y,pressure:e.pressure,buttons:e.buttons,tiltX:e.tiltX||0,tiltY:e.tiltY||0};lastSample=event;
+ trail.add(e,type);transport.send(event);updateHUD();
+ dot.style.display='block';dot.style.left=e.clientX+'px';dot.style.top=e.clientY+'px';
+}
+function updateHUD(){if(!stopped&&lastSample)hud.textContent=`${lastSample.buttons&1?'落笔':'悬停'} · x ${lastSample.x.toFixed(3)} · y ${lastSample.y.toFixed(3)} · 压力 ${lastSample.pressure.toFixed(3)} · 已连接`;}
+function recordTouch(e,type){
+ if(stopped)return;
+ const rect=pad.getBoundingClientRect();
+ transport.send({type:'touch_'+type,buttons:e.slot,x:Math.max(0,Math.min(1,(e.clientX-rect.left)/rect.width)),y:Math.max(0,Math.min(1,(e.clientY-rect.top)/rect.height))});
+}
+const touchInput=createTouchInput({surface:pad,emit:recordTouch,isRunning:()=>!stopped,penActive:()=>penInput.state.inRange||penInput.state.contact!==null});
+const penInput=createPenInput({surface:pad,emit:(e,type)=>{if(type==='enter'||type==='down')touchInput.cancelAll();record(e,type);if(type==='leave'||type==='cancel')dot.style.display='none'},isRunning:()=>!stopped,onBoundary:flush});
+const transport=new PenTransport({url:()=>`${location.protocol==='https:'?'wss':'ws'}://${location.host}/ws`,ratio:()=>pad.clientWidth/pad.clientHeight,
+ onReset:resetInput,onState:(state,text)=>{
+  stopped=state!=='connected';hud.textContent=text;
+  if(state==='connected'){geometry=dims();gate.style.display='none';}
+  if(state==='stopped'){gate.style.display='grid';message.textContent=text;}
+ }});
+document.querySelector('#start').onclick=async()=>{
+ try{
+  if(document.fullscreenElement!==pad)await pad.requestFullscreen();
+  gate.style.display='none';transport.start();
+ }catch(e){stop(e.message);}
+};
+pad.oncontextmenu=e=>e.preventDefault();
+function leave(){stop('已暂停，点击重新开始。');}
+document.addEventListener('fullscreenchange',()=>{if(document.fullscreenElement!==pad)leave();});
+document.addEventListener('visibilitychange',()=>{if(document.hidden)leave();});
+window.addEventListener('pagehide',leave);
+window.addEventListener('resize',()=>{if(!stopped&&dims()!==geometry){transport.start();}});
+</script>
+</html>

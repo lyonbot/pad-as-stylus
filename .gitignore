@@ -1,0 +1,7 @@
+.build/
+__pycache__/
+*.pyc
+.local/
+.playwright-mcp/
+.DS_Store
+.venv/
